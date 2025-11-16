@@ -20,8 +20,8 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 # Configuration
 # ---------------------------------------------------------------------------
 
-COMMAND = r"C:\Users\Admin\AppData\Local\Programs\Python\Python312\python.exe"
-SERVER_SCRIPT = Path(r"C:\Users\Admin\Documents\mcp_runtime_v3\server.py")
+COMMAND = sys.executable
+SERVER_SCRIPT = Path(__file__).parent / "server.py"
 ENV = {
     "PYTHONUNBUFFERED": "1",
     "MCP_RUNTIME_ALLOW_SHELL": "false",

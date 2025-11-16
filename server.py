@@ -64,22 +64,30 @@ REDIS_HOST = os.getenv("MCP_MEMORY_REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("MCP_MEMORY_REDIS_PORT", "6379"))
 REDIS_DB = int(os.getenv("MCP_MEMORY_REDIS_DB", "5"))
 
-try:
-    redis_client: Optional[redis.Redis] = redis.Redis(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        db=REDIS_DB,
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
-    )
-    redis_client.ping()
-    MEMORY_ENABLED = True
-    log.info(f"Redis connected: {REDIS_HOST}:{REDIS_PORT} DB={REDIS_DB}")
-except Exception as e:
-    redis_client = None
-    MEMORY_ENABLED = False
-    log.warning(f"Redis not available: {e}. Memory features disabled.")
+# Initialize Redis client without blocking ping
+redis_client: Optional[redis.Redis] = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    db=REDIS_DB,
+    decode_responses=True,
+    socket_connect_timeout=2,
+    socket_timeout=2,
+)
+MEMORY_ENABLED = False  # Will be set to True after successful async check
+
+async def _check_redis_connection() -> None:
+    """Non-blocking Redis connection check during startup."""
+    global MEMORY_ENABLED, redis_client
+    try:
+        # Test connection asynchronously
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, redis_client.ping)
+        MEMORY_ENABLED = True
+        log.info(f"Redis connected: {REDIS_HOST}:{REDIS_PORT} DB={REDIS_DB}")
+    except Exception as e:
+        redis_client = None
+        MEMORY_ENABLED = False
+        log.warning(f"Redis not available: {e}. Memory features disabled.")
 
 # Key prefixes
 REDIS_MEMORY_PREFIX = "mem:"
@@ -871,6 +879,9 @@ async def _stdio_server() -> anyio.abc.AsyncResource:
 
 def main() -> None:
     async def _run() -> None:
+        # Check Redis connection asynchronously during startup
+        await _check_redis_connection()
+
         log.info("Starting MCP Runtime v3.0...")
         log.info(f"Project root: {PROJECT_ROOT}")
         log.info(f"Memory enabled: {MEMORY_ENABLED}")

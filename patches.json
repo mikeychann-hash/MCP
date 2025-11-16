@@ -1,0 +1,32 @@
+{
+  "patches": [
+    {
+      "file": "/home/user/MCP/validate_mcp.py",
+      "diff": "--- a/validate_mcp.py\n+++ b/validate_mcp.py\n@@ -20,8 +20,8 @@\n # Configuration\n # ---------------------------------------------------------------------------\n \n-COMMAND = r\"C:\\Users\\Admin\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\"\n-SERVER_SCRIPT = Path(r\"C:\\Users\\Admin\\Documents\\mcp_runtime_v3\\server.py\")\n+COMMAND = sys.executable\n+SERVER_SCRIPT = Path(__file__).parent / \"server.py\"\n ENV = {\n     \"PYTHONUNBUFFERED\": \"1\",\n     \"MCP_RUNTIME_ALLOW_SHELL\": \"false\",",
+      "explanation": "Replaced hardcoded Windows paths with cross-platform alternatives. COMMAND now uses sys.executable (the current Python interpreter) and SERVER_SCRIPT uses Path(__file__).parent to locate server.py relative to the script location. This makes the code portable across Windows, Linux, and macOS.",
+      "backward_compatible": true,
+      "rollback": "git checkout -- /home/user/MCP/validate_mcp.py"
+    },
+    {
+      "file": "/home/user/MCP/server.py",
+      "diff": "--- a/server.py\n+++ b/server.py\n@@ -64,20 +64,30 @@\n REDIS_PORT = int(os.getenv(\"MCP_MEMORY_REDIS_PORT\", \"6379\"))\n REDIS_DB = int(os.getenv(\"MCP_MEMORY_REDIS_DB\", \"5\"))\n \n-try:\n-    redis_client: Optional[redis.Redis] = redis.Redis(\n-        host=REDIS_HOST,\n-        port=REDIS_PORT,\n-        db=REDIS_DB,\n-        decode_responses=True,\n-        socket_connect_timeout=2,\n-        socket_timeout=2,\n-    )\n-    redis_client.ping()\n-    MEMORY_ENABLED = True\n-    log.info(f\"Redis connected: {REDIS_HOST}:{REDIS_PORT} DB={REDIS_DB}\")\n-except Exception as e:\n-    redis_client = None\n-    MEMORY_ENABLED = False\n-    log.warning(f\"Redis not available: {e}. Memory features disabled.\")\n+# Initialize Redis client without blocking ping\n+redis_client: Optional[redis.Redis] = redis.Redis(\n+    host=REDIS_HOST,\n+    port=REDIS_PORT,\n+    db=REDIS_DB,\n+    decode_responses=True,\n+    socket_connect_timeout=2,\n+    socket_timeout=2,\n+)\n+MEMORY_ENABLED = False  # Will be set to True after successful async check\n+\n+async def _check_redis_connection() -> None:\n+    \"\"\"Non-blocking Redis connection check during startup.\"\"\"\n+    global MEMORY_ENABLED, redis_client\n+    try:\n+        # Test connection asynchronously\n+        loop = asyncio.get_event_loop()\n+        await loop.run_in_executor(None, redis_client.ping)\n+        MEMORY_ENABLED = True\n+        log.info(f\"Redis connected: {REDIS_HOST}:{REDIS_PORT} DB={REDIS_DB}\")\n+    except Exception as e:\n+        redis_client = None\n+        MEMORY_ENABLED = False\n+        log.warning(f\"Redis not available: {e}. Memory features disabled.\")\n \n # Key prefixes\n REDIS_MEMORY_PREFIX = \"mem:\"\n@@ -871,6 +881,8 @@\n \n def main() -> None:\n     async def _run() -> None:\n+        # Check Redis connection asynchronously during startup\n+        await _check_redis_connection()\n         log.info(\"Starting MCP Runtime v3.0...\")\n         log.info(f\"Project root: {PROJECT_ROOT}\")\n         log.info(f\"Memory enabled: {MEMORY_ENABLED}\")",
+      "explanation": "Moved blocking Redis ping() from module initialization to async startup. The Redis client is now created without blocking, and the connection test happens asynchronously in _check_redis_connection() which is called in main(). This prevents the server from hanging during import if Redis is slow or unavailable. The connection check now runs in an executor to avoid blocking the event loop.",
+      "backward_compatible": true,
+      "rollback": "git checkout -- /home/user/MCP/server.py"
+    },
+    {
+      "file": "/home/user/MCP/requirements.txt",
+      "diff": "--- /dev/null\n+++ b/requirements.txt\n@@ -0,0 +1,10 @@\n+# MCP Runtime v3.0 Dependencies\n+mcp[cli]>=1.0.0\n+numpy>=1.24.0\n+scipy>=1.10.0\n+sympy>=1.12\n+redis>=4.5.0\n+sentence-transformers>=2.2.0\n+anyio>=3.6.0\n+# Optional: For development\n+# pytest>=7.0.0",
+      "explanation": "Added requirements.txt with all necessary dependencies for the MCP Runtime v3.0 server. Includes core libraries (mcp, numpy, scipy, sympy), Redis client, sentence-transformers for embeddings, and anyio for async I/O. Version constraints are specified to ensure compatibility while allowing minor updates.",
+      "backward_compatible": true,
+      "rollback": "rm /home/user/MCP/requirements.txt"
+    },
+    {
+      "file": "/home/user/MCP/.env.example",
+      "diff": "--- /dev/null\n+++ b/.env.example\n@@ -0,0 +1,21 @@\n+# MCP Runtime v3.0 Environment Configuration Template\n+# Copy this file to .env and customize for your environment\n+\n+# Redis Configuration (for memory features)\n+MCP_MEMORY_REDIS_HOST=localhost\n+MCP_MEMORY_REDIS_PORT=6379\n+MCP_MEMORY_REDIS_DB=5\n+\n+# Project Root (defaults to current working directory)\n+# MCP_RUNTIME_PROJECT_ROOT=/path/to/project\n+\n+# Shell Tool (disabled by default for security)\n+MCP_RUNTIME_ALLOW_SHELL=false\n+\n+# Embedding Model Configuration\n+MCP_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2\n+MCP_EMBED_DIM=384\n+\n+# File Indexing Limits\n+MCP_INDEX_MAX_SIZE=2097152\n+MCP_INDEX_MAX_CHARS=2000",
+      "explanation": "Added .env.example as a configuration template showing all available environment variables with sensible defaults. This helps users understand configuration options and set up their environment correctly. Includes Redis settings, security controls (shell tool), embedding model configuration, and file indexing limits.",
+      "backward_compatible": true,
+      "rollback": "rm /home/user/MCP/.env.example"
+    }
+  ]
+}
