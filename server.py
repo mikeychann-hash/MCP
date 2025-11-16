@@ -24,11 +24,12 @@ import asyncio
 import functools
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -63,6 +64,8 @@ PROJECT_ROOT = Path(os.getenv("MCP_RUNTIME_PROJECT_ROOT", os.getcwd())).resolve(
 REDIS_HOST = os.getenv("MCP_MEMORY_REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("MCP_MEMORY_REDIS_PORT", "6379"))
 REDIS_DB = int(os.getenv("MCP_MEMORY_REDIS_DB", "5"))
+REDIS_CONNECT_TIMEOUT = int(os.getenv("MCP_REDIS_CONNECT_TIMEOUT", "5"))
+REDIS_SOCKET_TIMEOUT = int(os.getenv("MCP_REDIS_SOCKET_TIMEOUT", "5"))
 
 # Initialize Redis client without blocking ping
 redis_client: Optional[redis.Redis] = redis.Redis(
@@ -70,8 +73,8 @@ redis_client: Optional[redis.Redis] = redis.Redis(
     port=REDIS_PORT,
     db=REDIS_DB,
     decode_responses=True,
-    socket_connect_timeout=2,
-    socket_timeout=2,
+    socket_connect_timeout=REDIS_CONNECT_TIMEOUT,
+    socket_timeout=REDIS_SOCKET_TIMEOUT,
 )
 MEMORY_ENABLED = False  # Will be set to True after successful async check
 
@@ -226,6 +229,30 @@ def _json_safe(value: Any) -> Any:
         return value
     except Exception:
         return repr(value)
+
+
+def _safe_json_dumps(obj: Any, context: str = "") -> str:
+    """
+    Safely serialize object to JSON with fallback for non-serializable types.
+
+    Args:
+        obj: Object to serialize
+        context: Description of what's being serialized (for logging)
+
+    Returns:
+        JSON string
+    """
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except (TypeError, ValueError) as e:
+        log.warning(f"JSON serialization failed for {context}: {e}. Using fallback.")
+        # Try with custom JSON encoder
+        try:
+            return json.dumps(obj, default=str, ensure_ascii=False)
+        except Exception as e2:
+            log.error(f"Fallback serialization also failed for {context}: {e2}")
+            # Last resort: use repr
+            return json.dumps({"_repr": repr(obj), "_error": str(e)})
 
 
 # Wrap tools to auto-log calls into Redis
