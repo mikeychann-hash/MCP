@@ -24,9 +24,11 @@ import asyncio
 import functools
 import json
 import os
+import platform
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
@@ -117,17 +119,43 @@ _embed_model: Optional[SentenceTransformer] = None
 
 @contextmanager
 def _timeout(seconds):
-    """Context manager for operation timeout using SIGALRM."""
-    def timeout_handler(signum, frame):
-        raise TimeoutError(f"Operation timed out after {seconds}s")
+    """Context manager for operation timeout (cross-platform).
 
-    original_handler = signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, original_handler)
+    Uses threading.Timer on Windows (SIGALRM not available).
+    Uses SIGALRM on Unix/Linux/macOS for better precision.
+    """
+    is_windows = platform.system() == 'Windows'
+
+    if is_windows:
+        # Windows: Use threading.Timer
+        timed_out = threading.Event()
+
+        def timeout_handler():
+            timed_out.set()
+
+        timer = threading.Timer(seconds, timeout_handler)
+        timer.daemon = True
+        timer.start()
+
+        try:
+            yield
+            # Check if we timed out after the operation completes
+            if timed_out.is_set():
+                raise TimeoutError(f"Operation timed out after {seconds}s")
+        finally:
+            timer.cancel()
+    else:
+        # Unix/Linux/macOS: Use SIGALRM for precision
+        def timeout_handler(signum, frame):
+            raise TimeoutError(f"Operation timed out after {seconds}s")
+
+        original_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, original_handler)
 
 
 def _get_embed_model() -> SentenceTransformer:
@@ -914,6 +942,7 @@ async def _stdio_server() -> anyio.abc.AsyncResource:
                 while True:
                     body = await read_packet()
                     if body is None:
+                        log.info("Reader: EOF detected on stdin, shutting down gracefully")
                         break
                     try:
                         msg = JSONRPCMessage.model_validate_json(body.decode("utf-8"))
@@ -922,9 +951,13 @@ async def _stdio_server() -> anyio.abc.AsyncResource:
                         log.error(f"Failed to parse JSON-RPC message: {exc}")
                         log.debug(f"Problem JSON: {body[:200]!r}")
         except anyio.ClosedResourceError:
-            log.debug("Reader: stdin closed")
+            log.info("Reader: stdin closed by client, shutting down")
+        except anyio.get_cancelled_exc_class():
+            log.info("Reader: task cancelled, shutting down")
+            raise  # Re-raise to properly propagate cancellation
         except Exception as e:
-            log.error(f"Reader error: {e}")
+            log.error(f"Reader fatal error: {e}", exc_info=True)
+            raise  # Re-raise to trigger task group cleanup
 
     async def writer():
         try:
@@ -935,9 +968,13 @@ async def _stdio_server() -> anyio.abc.AsyncResource:
                     await a_stdout.write(header + payload)
                     await a_stdout.flush()
         except anyio.ClosedResourceError:
-            log.debug("Writer: stdout closed")
+            log.info("Writer: stdout closed by client, shutting down")
+        except anyio.get_cancelled_exc_class():
+            log.info("Writer: task cancelled, shutting down")
+            raise  # Re-raise to properly propagate cancellation
         except Exception as e:
-            log.error(f"Writer error: {e}")
+            log.error(f"Writer fatal error: {e}", exc_info=True)
+            raise  # Re-raise to trigger task group cleanup
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(reader)
