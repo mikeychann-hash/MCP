@@ -2,12 +2,13 @@
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-COMMAND = r"C:\Users\Admin\AppData\Local\Programs\Python\Python312\python.exe"
-SERVER = r"C:\Users\Admin\Documents\mcp_runtime_v3\server.py"
+PYTHON_EXE = sys.executable
+SERVER_PATH = Path(__file__).parent / "server.py"
 
 proc = subprocess.Popen(
-    [COMMAND, SERVER],
+    [PYTHON_EXE, str(SERVER_PATH)],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
