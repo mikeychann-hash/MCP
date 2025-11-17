@@ -1,0 +1,29 @@
+From: PatchAgent <patch@agent.local>
+Subject: [PATCH 3/4] Add requirements.txt for dependency management
+
+Add requirements.txt with all necessary dependencies for MCP Runtime v3.0
+including mcp, numpy, scipy, sympy, redis, sentence-transformers, and anyio.
+
+---
+ requirements.txt | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+ create mode 100644 requirements.txt
+
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,10 @@
++# MCP Runtime v3.0 Dependencies
++mcp[cli]>=1.0.0
++numpy>=1.24.0
++scipy>=1.10.0
++sympy>=1.12
++redis>=4.5.0
++sentence-transformers>=2.2.0
++anyio>=3.6.0
++# Optional: For development
++# pytest>=7.0.0
+--
+2.40.0

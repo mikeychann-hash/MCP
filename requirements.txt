@@ -1,0 +1,10 @@
+# MCP Runtime v3.0 Dependencies
+mcp[cli]>=1.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+sympy>=1.12
+redis>=4.5.0
+sentence-transformers>=2.2.0
+anyio>=3.6.0
+# Optional: For development
+# pytest>=7.0.0

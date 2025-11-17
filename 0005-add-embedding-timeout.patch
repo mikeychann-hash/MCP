@@ -1,0 +1,79 @@
+diff --git a/.env.example b/.env.example
+index 3986f5c..a4bb739 100644
+--- a/.env.example
++++ b/.env.example
+@@ -17,6 +17,7 @@ MCP_RUNTIME_ALLOW_SHELL=false
+ # Embedding Model Configuration
+ MCP_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+ MCP_EMBED_DIM=384
++MCP_EMBED_LOAD_TIMEOUT=300
+ 
+ # File Indexing Limits
+ MCP_INDEX_MAX_SIZE=2097152
+diff --git a/server.py b/server.py
+index 26ff919..6a6bc50 100644
+--- a/server.py
++++ b/server.py
+@@ -110,17 +110,58 @@ EMBED_MODEL_NAME = os.getenv(
+     "sentence-transformers/all-MiniLM-L6-v2",
+ )
+ EMBED_DIM = int(os.getenv("MCP_EMBED_DIM", "384"))  # all-MiniLM-L6-v2 is 384-d
++EMBED_LOAD_TIMEOUT = int(os.getenv("MCP_EMBED_LOAD_TIMEOUT", "300"))  # 5 minutes default
+ 
+ _embed_model: Optional[SentenceTransformer] = None
+ 
+ 
++@contextmanager
++def _timeout(seconds):
++    """Context manager for operation timeout using SIGALRM."""
++    def timeout_handler(signum, frame):
++        raise TimeoutError(f"Operation timed out after {seconds}s")
++
++    original_handler = signal.signal(signal.SIGALRM, timeout_handler)
++    signal.alarm(seconds)
++    try:
++        yield
++    finally:
++        signal.alarm(0)
++        signal.signal(signal.SIGALRM, original_handler)
++
++
+ def _get_embed_model() -> SentenceTransformer:
+-    """Lazy-load the embedding model only when first needed."""
++    """Lazy-load the embedding model only when first needed.
++
++    Implements timeout mechanism (default 300s) and retry logic (3 attempts)
++    with exponential backoff to handle slow or failed model downloads.
++    """
+     global _embed_model
+     if _embed_model is None:
+-        log.info(f"Loading embedding model: {EMBED_MODEL_NAME} (this may take a moment)...")
+-        _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+-        log.info("Embedding model loaded successfully")
++        log.info(f"Loading embedding model: {EMBED_MODEL_NAME} (timeout: {EMBED_LOAD_TIMEOUT}s)...")
++
++        for attempt in range(3):
++            try:
++                with _timeout(EMBED_LOAD_TIMEOUT):
++                    _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
++                log.info("Embedding model loaded successfully")
++                break
++            except TimeoutError:
++                log.warning(f"Model loading timed out (attempt {attempt+1}/3)")
++                if attempt == 2:
++                    raise RuntimeError(
++                        f"Failed to load embedding model '{EMBED_MODEL_NAME}' after 3 attempts "
++                        f"(timeout: {EMBED_LOAD_TIMEOUT}s). "
++                        f"Try increasing MCP_EMBED_LOAD_TIMEOUT or check your network connection."
++                    )
++                # Exponential backoff: 1s, 2s, 4s
++                backoff_time = 2 ** attempt
++                log.info(f"Retrying in {backoff_time}s...")
++                time.sleep(backoff_time)
++            except Exception as e:
++                log.error(f"Failed to load embedding model: {e}")
++                raise
++
+     return _embed_model
+ 
+ 

@@ -24,11 +24,12 @@ import asyncio
 import functools
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -63,23 +64,33 @@ PROJECT_ROOT = Path(os.getenv("MCP_RUNTIME_PROJECT_ROOT", os.getcwd())).resolve(
 REDIS_HOST = os.getenv("MCP_MEMORY_REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("MCP_MEMORY_REDIS_PORT", "6379"))
 REDIS_DB = int(os.getenv("MCP_MEMORY_REDIS_DB", "5"))
+REDIS_CONNECT_TIMEOUT = int(os.getenv("MCP_REDIS_CONNECT_TIMEOUT", "5"))
+REDIS_SOCKET_TIMEOUT = int(os.getenv("MCP_REDIS_SOCKET_TIMEOUT", "5"))
 
-try:
-    redis_client: Optional[redis.Redis] = redis.Redis(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        db=REDIS_DB,
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
-    )
-    redis_client.ping()
-    MEMORY_ENABLED = True
-    log.info(f"Redis connected: {REDIS_HOST}:{REDIS_PORT} DB={REDIS_DB}")
-except Exception as e:
-    redis_client = None
-    MEMORY_ENABLED = False
-    log.warning(f"Redis not available: {e}. Memory features disabled.")
+# Initialize Redis client without blocking ping
+redis_client: Optional[redis.Redis] = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    db=REDIS_DB,
+    decode_responses=True,
+    socket_connect_timeout=REDIS_CONNECT_TIMEOUT,
+    socket_timeout=REDIS_SOCKET_TIMEOUT,
+)
+MEMORY_ENABLED = False  # Will be set to True after successful async check
+
+async def _check_redis_connection() -> None:
+    """Non-blocking Redis connection check during startup."""
+    global MEMORY_ENABLED, redis_client
+    try:
+        # Test connection asynchronously
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, redis_client.ping)
+        MEMORY_ENABLED = True
+        log.info(f"Redis connected: {REDIS_HOST}:{REDIS_PORT} DB={REDIS_DB}")
+    except Exception as e:
+        redis_client = None
+        MEMORY_ENABLED = False
+        log.warning(f"Redis not available: {e}. Memory features disabled.")
 
 # Key prefixes
 REDIS_MEMORY_PREFIX = "mem:"
@@ -99,17 +110,58 @@ EMBED_MODEL_NAME = os.getenv(
     "sentence-transformers/all-MiniLM-L6-v2",
 )
 EMBED_DIM = int(os.getenv("MCP_EMBED_DIM", "384"))  # all-MiniLM-L6-v2 is 384-d
+EMBED_LOAD_TIMEOUT = int(os.getenv("MCP_EMBED_LOAD_TIMEOUT", "300"))  # 5 minutes default
 
 _embed_model: Optional[SentenceTransformer] = None
 
 
+@contextmanager
+def _timeout(seconds):
+    """Context manager for operation timeout using SIGALRM."""
+    def timeout_handler(signum, frame):
+        raise TimeoutError(f"Operation timed out after {seconds}s")
+
+    original_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, original_handler)
+
+
 def _get_embed_model() -> SentenceTransformer:
-    """Lazy-load the embedding model only when first needed."""
+    """Lazy-load the embedding model only when first needed.
+
+    Implements timeout mechanism (default 300s) and retry logic (3 attempts)
+    with exponential backoff to handle slow or failed model downloads.
+    """
     global _embed_model
     if _embed_model is None:
-        log.info(f"Loading embedding model: {EMBED_MODEL_NAME} (this may take a moment)...")
-        _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
-        log.info("Embedding model loaded successfully")
+        log.info(f"Loading embedding model: {EMBED_MODEL_NAME} (timeout: {EMBED_LOAD_TIMEOUT}s)...")
+
+        for attempt in range(3):
+            try:
+                with _timeout(EMBED_LOAD_TIMEOUT):
+                    _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+                log.info("Embedding model loaded successfully")
+                break
+            except TimeoutError:
+                log.warning(f"Model loading timed out (attempt {attempt+1}/3)")
+                if attempt == 2:
+                    raise RuntimeError(
+                        f"Failed to load embedding model '{EMBED_MODEL_NAME}' after 3 attempts "
+                        f"(timeout: {EMBED_LOAD_TIMEOUT}s). "
+                        f"Try increasing MCP_EMBED_LOAD_TIMEOUT or check your network connection."
+                    )
+                # Exponential backoff: 1s, 2s, 4s
+                backoff_time = 2 ** attempt
+                log.info(f"Retrying in {backoff_time}s...")
+                time.sleep(backoff_time)
+            except Exception as e:
+                log.error(f"Failed to load embedding model: {e}")
+                raise
+
     return _embed_model
 
 
@@ -220,6 +272,30 @@ def _json_safe(value: Any) -> Any:
         return repr(value)
 
 
+def _safe_json_dumps(obj: Any, context: str = "") -> str:
+    """
+    Safely serialize object to JSON with fallback for non-serializable types.
+
+    Args:
+        obj: Object to serialize
+        context: Description of what's being serialized (for logging)
+
+    Returns:
+        JSON string
+    """
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except (TypeError, ValueError) as e:
+        log.warning(f"JSON serialization failed for {context}: {e}. Using fallback.")
+        # Try with custom JSON encoder
+        try:
+            return json.dumps(obj, default=str, ensure_ascii=False)
+        except Exception as e2:
+            log.error(f"Fallback serialization also failed for {context}: {e2}")
+            # Last resort: use repr
+            return json.dumps({"_repr": repr(obj), "_error": str(e)})
+
+
 # Wrap tools to auto-log calls into Redis
 _original_tool_decorator = mcp.tool
 
@@ -235,7 +311,7 @@ def _log_tool_call(tool_name: str, args: Any, kwargs: Any) -> None:
     }
     key = f"tool_log:{time.time()}:{tool_name}"
     try:
-        redis_client.set(key, json.dumps(entry), ex=86400)
+        redis_client.set(key, _safe_json_dumps(entry, f"tool_log:{tool_name}"), ex=86400)
     except Exception:
         pass
 
@@ -455,7 +531,7 @@ def index_project_files(root_dir: str = ".") -> Dict[str, Any]:
             try:
                 entry = _build_file_index_entry(fpath)
                 key = REDIS_FILE_INDEX_PREFIX + entry["path"]
-                redis_client.set(key, json.dumps(entry))
+                redis_client.set(key, _safe_json_dumps(entry, f"file_index:{entry['path']}"))
                 indexed += 1
             except Exception:
                 continue
@@ -477,7 +553,7 @@ def index_single_file(file_path: str, embed: bool = True) -> Dict[str, Any]:
 
     entry = _build_file_index_entry(fpath)
     key = REDIS_FILE_INDEX_PREFIX + entry["path"]
-    redis_client.set(key, json.dumps(entry))
+    redis_client.set(key, _safe_json_dumps(entry, f"file_index:{entry['path']}"))
 
     result: Dict[str, Any] = {"indexed": True, "path": entry["path"]}
     if embed:
@@ -485,7 +561,7 @@ def index_single_file(file_path: str, embed: bool = True) -> Dict[str, Any]:
         emb = _embed_text(text)
         emb_key = REDIS_EMBED_FILE_PREFIX + entry["path"]
         emb_data = {"path": entry["path"], "text": text, "embedding": emb}
-        redis_client.set(emb_key, json.dumps(emb_data))
+        redis_client.set(emb_key, _safe_json_dumps(emb_data, f"file_embedding:{entry['path']}"))
         result["embedded"] = True
     return result
 
@@ -527,7 +603,7 @@ def save_agent_snapshot(agent_id: str, state: Any, embed: bool = True) -> Dict[s
         raise RuntimeError("Redis memory is not enabled.")
 
     key = REDIS_AGENT_SNAPSHOT_PREF + agent_id
-    redis_client.set(key, json.dumps(state))
+    redis_client.set(key, _safe_json_dumps(state, f"agent_snapshot:{agent_id}"))
 
     result: Dict[str, Any] = {"saved": True, "agent_id": agent_id}
     if embed:
@@ -535,7 +611,7 @@ def save_agent_snapshot(agent_id: str, state: Any, embed: bool = True) -> Dict[s
         emb = _embed_text(text)
         emb_key = REDIS_EMBED_AGENT_PREFIX + agent_id
         emb_data = {"agent_id": agent_id, "text": text, "embedding": emb}
-        redis_client.set(emb_key, json.dumps(emb_data))
+        redis_client.set(emb_key, _safe_json_dumps(emb_data, f"agent_embedding:{agent_id}"))
         result["embedded"] = True
     return result
 
@@ -651,7 +727,7 @@ def queue_task(name: str, payload: Any = None) -> Dict[str, Any]:
         raise RuntimeError("Redis memory is not enabled.")
     task_id = str(uuid.uuid4())
     task = {"id": task_id, "name": name, "payload": payload, "queued_at": time.time(), "status": "queued"}
-    redis_client.rpush(REDIS_TASK_QUEUE_KEY, json.dumps(task))
+    redis_client.rpush(REDIS_TASK_QUEUE_KEY, _safe_json_dumps(task, f"task_queue:{name}"))
     return {"queued": True, "task": task}
 
 
@@ -674,7 +750,7 @@ def finish_task(task_id: str, result: Any = None) -> Dict[str, Any]:
         raise RuntimeError("Redis memory is not enabled.")
     hist_key = REDIS_TASK_HISTORY_PREF + str(time.time())
     entry = {"task_id": task_id, "finished_at": time.time(), "result": result}
-    redis_client.set(hist_key, json.dumps(entry))
+    redis_client.set(hist_key, _safe_json_dumps(entry, f"task_history:{task_id}"))
     return {"ok": True, "history_key": hist_key}
 
 
@@ -871,6 +947,9 @@ async def _stdio_server() -> anyio.abc.AsyncResource:
 
 def main() -> None:
     async def _run() -> None:
+        # Check Redis connection asynchronously during startup
+        await _check_redis_connection()
+
         log.info("Starting MCP Runtime v3.0...")
         log.info(f"Project root: {PROJECT_ROOT}")
         log.info(f"Memory enabled: {MEMORY_ENABLED}")
