@@ -1,0 +1,24 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schemas/client-config.json",
+  "mcpServers": {
+    "mcp-runtime-v3": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\YourUsername\\Documents\\mcp-runtime-v3\\dist\\index.js"
+      ],
+      "env": {
+        "REDIS_HOST": "localhost",
+        "REDIS_PORT": "6379",
+        "REDIS_DB": "5",
+        "REDIS_ENABLED": "true",
+        "PROJECT_ROOT": "C:\\Users\\YourUsername\\Documents\\MyProject",
+        "ALLOW_SHELL_EXECUTION": "false",
+        "LOG_LEVEL": "info",
+        "ENABLE_SEMANTIC_SEARCH": "true",
+        "ENABLE_FILE_INDEXING": "true",
+        "ENABLE_MEMORY_PERSISTENCE": "true"
+      }
+    }
+  },
+  "globalShortcut": "CommandOrControl+Shift+Space"
+}
